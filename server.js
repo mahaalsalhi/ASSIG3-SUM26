@@ -15,6 +15,15 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.urlencoded({ extended: false }));
+
+app.use((req, res, next) => {
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+  );
+  next();
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------------------------------------------------------------------------
@@ -35,6 +44,15 @@ function parseCookies(req) {
 function currentUser(req) {
   const sid = parseCookies(req).sid;
   return sid && sessions.has(sid) ? sessions.get(sid) : null;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 // ---------------------------------------------------------------------------
@@ -102,19 +120,28 @@ app.get('/search', (req, res) => {
   // Fix idea: bind the search value with a "?" placeholder, and choose the
   //   ORDER BY expression from a fixed allow-list (you cannot bind an
   //   identifier the way you bind a value).
-  const sql =
-    `SELECT id, title, species, location FROM listings ` +
-    `WHERE title LIKE '%${q}%' OR species LIKE '%${q}%' ` +
-    `ORDER BY ${sort}`;
+  const sortOptions = {
+  'created_at DESC': 'created_at DESC',
+  species: 'species',
+  title: 'title',
+  'title DESC': 'title DESC',
+};
 
-  let rows = [];
-  let error = null;
-  try {
-    rows = all(sql);
-  } catch (e) {
-    error = e.message;
-  }
+const safeSort = sortOptions[sort] || 'created_at DESC';
+const searchValue = `%${q}%`;
 
+const sql =
+  `SELECT id, title, species, location FROM listings ` +
+  `WHERE title LIKE ? OR species LIKE ? ` +
+  `ORDER BY ${safeSort}`;
+
+let rows = [];
+let error = null;
+try {
+  rows = all(sql, [searchValue, searchValue]);
+} catch (e) {
+  error = e.message;
+}
   const results = rows
     .map(
       (r) => `<article class="card">
@@ -129,8 +156,7 @@ app.get('/search', (req, res) => {
   // The raw search term is echoed back into the HTML response, so whatever
   // the visitor typed is parsed by the browser as markup.
   // Fix idea: HTML-encode any untrusted value before it lands in the page.
-  const heading = `<h1>Search</h1><p class="note">Showing results for “${q}”</p>`;
-
+  const heading = `<h1>Search</h1><p class="note">Showing results for “${escapeHtml(q)}”</p>`;
   const bodyErr = error ? `<p class="error">Query error: ${error}</p>` : '';
   const list = rows.length ? `<div class="grid">${results}</div>` : '<p>No matches.</p>';
   res.send(layout('Search', heading + bodyErr + list, req));
@@ -164,15 +190,15 @@ app.post('/login', (req, res) => {
   // (e.g. a username of  curator' --  comments the password check away).
   // Fix idea: use a parameterized query so inputs are treated as pure data.
   const sql =
-    `SELECT id, username FROM users ` +
-    `WHERE username = '${username}' AND password = '${password}'`;
+  `SELECT id, username FROM users ` +
+  `WHERE username = ? AND password = ?`;
 
-  let user = null;
-  try {
-    user = get(sql);
-  } catch (e) {
-    // fall through to failure
-  }
+let user = null;
+try {
+  user = get(sql, [username, password]);
+} catch (e) {
+  // fall through to failure
+}
 
   if (!user) return res.redirect('/login?failed=1');
 
@@ -184,8 +210,14 @@ app.post('/login', (req, res) => {
   // on the page can read it via document.cookie and the browser attaches it
   // to cross-site requests.
   // Fix idea: add HttpOnly and SameSite (and Secure when served over HTTPS).
-  res.setHeader('Set-Cookie', `sid=${token}; Path=/`);
-  res.redirect('/me');
+  // ---- FIX 5 (part A): INSECURE SESSION COOKIE --------------------------
+
+res.setHeader(
+  'Set-Cookie',
+  `sid=${token}; Path=/; HttpOnly; SameSite=Strict`
+);
+
+res.redirect('/me');
 });
 
 app.get('/logout', (req, res) => {
@@ -235,8 +267,8 @@ app.get('/listing/:id', (req, res) => {
     ? comments
         .map(
           (c) => `<div class="comment">
-             <p class="comment-body">${c.body}</p>
-             <p class="comment-meta">— ${c.author}, ${c.created_at}</p>
+             <p class="comment-body">${escapeHtml(c.body)}</p>
+             <p class="comment-meta">— ${escapeHtml(c.author)}, ${c.created_at}</p>
            </div>`
         )
         .join('')
